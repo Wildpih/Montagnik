@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>TranscribeStudio — Переводчик</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Manrope:wght@400;500;600;700;800&display=swap');
+:root{
+  --bg:#0d0f14;--bg2:#13161e;--bg3:#1a1e28;
+  --border:#2a2f3e;--border2:#353b52;
+  --accent:#4f8cff;--accent2:#7ab3ff;
+  --accent-dim:rgba(79,140,255,.12);--accent-glow:rgba(79,140,255,.25);
+  --green:#3dd68c;--green-dim:rgba(61,214,140,.12);
+  --orange:#f59e0b;--orange-dim:rgba(245,158,11,.12);
+  --red:#f87171;--red-dim:rgba(248,113,113,.12);
+  --text:#e8ecf4;--text2:#8b92a8;--text3:#555d72;
+  --mono:'JetBrains Mono',monospace;--sans:'Manrope',sans-serif;
+  --r:8px;--rlg:14px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── Topbar ─────────────────────────────────────────── */
+#topbar{
+  height:50px;min-height:50px;background:var(--bg2);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:12px;padding:0 18px;flex-shrink:0;
+}
+.logo{font-size:14px;font-weight:800;display:flex;align-items:center;gap:7px}
+.logo-icon{width:24px;height:24px;background:var(--accent);border-radius:6px;display:grid;place-items:center;font-size:12px;flex-shrink:0}
+.sep{width:1px;height:24px;background:var(--border);flex-shrink:0}
+#topbar-title{font-size:13px;font-weight:700;color:var(--text2)}
+
+/* ── Controls bar ───────────────────────────────────── */
+#ctrl-bar{
+  background:var(--bg2);border-bottom:1px solid var(--border);
+  padding:10px 18px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;flex-shrink:0;
+}
+.fg{display:flex;flex-direction:column;gap:3px}
+.fl{font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.fsel{font-family:var(--sans);font-size:12px;background:var(--bg3);border:1px solid var(--border2);
+      border-radius:var(--r);color:var(--text);padding:5px 7px;outline:none;transition:.12s}
+.fsel:focus{border-color:var(--accent)} .fsel option{background:var(--bg3)}
+.btn{font-family:var(--sans);font-size:11px;font-weight:700;padding:6px 14px;border-radius:var(--r);
+     border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:.12s;white-space:nowrap}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-pri{background:var(--accent);color:#fff}.btn-pri:hover:not(:disabled){box-shadow:0 0 16px var(--accent-glow)}
+.btn-ghost{background:var(--bg3);color:var(--text2);border:1px solid var(--border2)}.btn-ghost:hover:not(:disabled){background:var(--border);color:var(--text)}
+.btn-red{background:var(--red-dim);color:var(--red);border:1px solid var(--red)}.btn-red:hover:not(:disabled){background:rgba(248,113,113,.22)}
+.btn-exp{padding:5px 10px;font-size:10px;font-weight:700;border-radius:5px;border:1px solid var(--border2);
+         background:var(--bg3);color:var(--text2);cursor:pointer;font-family:var(--sans);transition:.12s}
+.btn-exp:hover{background:var(--border);color:var(--text)}
+.btn-exp.suc{background:var(--green-dim);color:var(--green);border-color:var(--green)}
+
+/* ── Progress ───────────────────────────────────────── */
+#prog-wrap{display:none;padding:8px 18px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
+#prog-wrap.visible{display:block}
+.prog-lbl{font-size:12px;font-weight:600;color:var(--text2);margin-bottom:5px}
+.prog-track{height:3px;background:var(--bg3);border-radius:3px;overflow:hidden}
+.prog-fill{height:100%;background:var(--accent);border-radius:3px;transition:width .4s;animation:ppulse 1.5s ease-in-out infinite}
+@keyframes ppulse{0%,100%{opacity:1}50%{opacity:.55}}
+
+/* ── Table area ─────────────────────────────────────── */
+#table-wrap{flex:1;overflow-y:auto;padding:14px 18px 40px}
+#table-wrap::-webkit-scrollbar{width:5px}
+#table-wrap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+#empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;
+             gap:10px;color:var(--text3);padding:60px 0;height:100%}
+.es-icon{font-size:44px;opacity:.2}.es-t{font-size:15px;font-weight:700;color:var(--text2)}
+.es-s{font-size:12px;text-align:center;max-width:340px;line-height:1.6}
+
+.tr-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.tr-tbl th{text-align:left;padding:6px 8px;font-size:10px;font-weight:700;text-transform:uppercase;
+           letter-spacing:.5px;color:var(--text3);border-bottom:1px solid var(--border);
+           position:sticky;top:0;background:var(--bg);z-index:2}
+.tr-tbl td{padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top;line-height:1.6}
+.tr-row:hover{background:var(--bg2)}
+.ts-cell{width:104px;font-family:var(--mono);font-size:10.5px;color:var(--text2);white-space:nowrap}
+.orig-cell{color:var(--text)}
+.trnl-cell{color:var(--accent2)}
+.empty-tr{color:var(--text3);font-style:italic;font-size:11px}
+
+/* ── Toast ──────────────────────────────────────────── */
+#toasts{position:fixed;bottom:18px;right:18px;z-index:9999;display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.toast{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--r);
+       padding:8px 12px;font-size:12px;font-weight:600;color:var(--text);
+       box-shadow:0 4px 24px rgba(0,0,0,.4);animation:tin .2s ease;display:flex;align-items:center;gap:6px}
+.toast.ok{border-color:var(--green);color:var(--green)}
+.toast.err{border-color:var(--red);color:var(--red)}
+.toast.info{border-color:var(--accent);color:var(--accent2)}
+@keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.spin{width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;
+      border-radius:50%;animation:rot .7s linear infinite;display:inline-block}
+@keyframes rot{to{transform:rotate(360deg)}}
+
+/* ── NLLB badge ─────────────────────────────────────── */
+#nllb-status{font-size:11px;padding:3px 9px;border-radius:10px;font-weight:700}
+.nllb-ok{background:var(--green-dim);color:var(--green);border:1px solid var(--green)}
+.nllb-no{background:var(--red-dim);color:var(--red);border:1px solid var(--red)}
+</style>
+</head>
+<body>
+
+<!-- Topbar -->
+<div id="topbar">
+  <div class="logo">
+    <div class="logo-icon">🌐</div>
+    TranscribeStudio
+  </div>
+  <div class="sep"></div>
+  <div id="topbar-title">Переводчик (NLLB-200)</div>
+  <div style="flex:1"></div>
+  <span id="nllb-status" class="nllb-no">NLLB-200 не скачана</span>
+</div>
+
+<!-- Controls -->
+<div id="ctrl-bar">
+  <!-- Проект -->
+  <div class="fg">
+    <label class="fl">Проект</label>
+    <select class="fsel" id="sel-proj" style="min-width:220px" onchange="onProjChange()">
+      <option value="">— выберите проект —</option>
+    </select>
+  </div>
+
+  <!-- Язык оригинала -->
+  <div class="fg">
+    <label class="fl">Язык оригинала</label>
+    <select class="fsel" id="sel-src">
+      <option value="eng_Latn">Английский</option>
+      <option value="rus_Cyrl" selected>Русский</option>
+      <option value="deu_Latn">Немецкий</option>
+      <option value="fra_Latn">Французский</option>
+      <option value="spa_Latn">Испанский</option>
+      <option value="ukr_Cyrl">Украинский</option>
+      <option value="zho_Hans">Китайский</option>
+      <option value="jpn_Jpan">Японский</option>
+      <option value="arb_Arab">Арабский</option>
+      <option value="pol_Latn">Польский</option>
+      <option value="ita_Latn">Итальянский</option>
+      <option value="por_Latn">Португальский</option>
+    </select>
+  </div>
+
+  <!-- Стрелка -->
+  <div style="font-size:18px;color:var(--text3);padding-bottom:5px">→</div>
+
+  <!-- Язык перевода -->
+  <div class="fg">
+    <label class="fl">Перевести на</label>
+    <select class="fsel" id="sel-tgt">
+      <option value="rus_Cyrl" selected>Русский</option>
+      <option value="eng_Latn">Английский</option>
+      <option value="deu_Latn">Немецкий</option>
+      <option value="fra_Latn">Французский</option>
+      <option value="spa_Latn">Испанский</option>
+      <option value="ukr_Cyrl">Украинский</option>
+      <option value="zho_Hans">Китайский</option>
+      <option value="jpn_Jpan">Японский</option>
+      <option value="arb_Arab">Арабский</option>
+      <option value="pol_Latn">Польский</option>
+      <option value="ita_Latn">Итальянский</option>
+      <option value="por_Latn">Португальский</option>
+    </select>
+  </div>
+
+  <!-- Кнопки -->
+  <button class="btn btn-pri" id="btn-translate" onclick="startTranslate()" disabled>
+    🌐 Перевести
+  </button>
+  <button class="btn btn-red" id="btn-clear" onclick="clearTranslation()" disabled title="Удалить все переводы из проекта">
+    🗑 Очистить перевод
+  </button>
+
+  <!-- Экспорт -->
+  <div style="display:flex;gap:5px;align-items:center;margin-left:8px">
+    <span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">Экспорт:</span>
+    <button class="btn-exp btn" onclick="exp('csv')">📄 CSV</button>
+    <button class="btn-exp btn" onclick="exp('srt')">📺 SRT</button>
+    <button class="btn-exp btn" onclick="exp('json')">{ } JSON</button>
+    <button class="btn-exp btn suc" onclick="exp('docx')">📝 DOCX</button>
+  </div>
+</div>
+
+<!-- Progress -->
+<div id="prog-wrap">
+  <div class="prog-lbl" id="prog-txt">Выполняется перевод...</div>
+  <div class="prog-track"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+</div>
+
+<!-- Table -->
+<div id="table-wrap">
+  <div id="empty-state">
+    <div class="es-icon">🌐</div>
+    <div class="es-t">Выберите проект</div>
+    <div class="es-s">
+      Выберите проект из выпадающего списка выше, затем нажмите «Перевести».<br>
+      Для работы необходимо скачать модель <b>NLLB-200</b> в главном окне во вкладке «Модели».
+    </div>
+  </div>
+  <table class="tr-tbl hidden" id="tr-tbl">
+    <thead>
+      <tr>
+        <th style="width:104px">Начало</th>
+        <th style="width:104px">Конец</th>
+        <th>Оригинал</th>
+        <th>Перевод</th>
+      </tr>
+    </thead>
+    <tbody id="tr-body"></tbody>
+  </table>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════
+let curPid = null;
+let curSegs = [];
+let pollTimer = null;
+let nllbReady = false;
+
+// ═══════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════
+async function safeJson(r){
+  const ct = r.headers.get('content-type') || '';
+  if(ct.includes('application/json')) return r.json();
+  const text = await r.text();
+  if(!r.ok){
+    const plain = text.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim().slice(0,400);
+    throw new Error(plain || `HTTP ${r.status}`);
+  }
+  return {};
+}
+
+function toast(msg, type='info'){
+  const c = document.getElementById('toasts');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span>${{ok:'✓',err:'✕',info:'ℹ'}[type]||''}</span>${escH(msg)}`;
+  c.appendChild(t); setTimeout(() => t.remove(), 4000);
+}
+
+function escH(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
+
+function fmtDate(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  return `${p2(d.getDate())}.${p2(d.getMonth()+1)} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+}
+function p2(n){ return String(n).padStart(2,'0') }
+
+// ═══════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════
+async function init(){
+  await Promise.all([loadProjects(), checkNllb()]);
+}
+
+async function checkNllb(){
+  try{
+    const r = await fetch('/api/models');
+    const models = await safeJson(r);
+    const nllb = models.find(m => m.arch === 'nllb');
+    nllbReady = nllb && nllb.downloaded;
+    const badge = document.getElementById('nllb-status');
+    if(nllbReady){
+      badge.textContent = 'NLLB-200 готова';
+      badge.className = 'nllb-ok';
+    } else {
+      badge.textContent = 'NLLB-200 не скачана';
+      badge.className = 'nllb-no';
+    }
+    updateButtons();
+  } catch(e){ console.error('checkNllb:', e) }
+}
+
+async function loadProjects(){
+  try{
+    const r = await fetch('/api/projects');
+    const projs = await safeJson(r);
+    const sel = document.getElementById('sel-proj');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— выберите проект —</option>';
+    projs.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      const hasSegs = p.segments_count > 0;
+      const hasTr = p.has_translation;
+      opt.textContent = `${p.name} (${p.segments_count} реп.${hasTr ? ' · ✓ перевод' : ''}) — ${fmtDate(p.updated_at)}`;
+      if(!hasSegs) opt.style.color = 'var(--text3)';
+      sel.appendChild(opt);
+    });
+    if(prev && projs.find(p => p.id === prev)){
+      sel.value = prev;
+    }
+  } catch(e){ toast('Не удалось загрузить проекты: ' + e.message, 'err') }
+}
+
+async function onProjChange(){
+  const pid = document.getElementById('sel-proj').value;
+  if(!pid){
+    curPid = null; curSegs = [];
+    document.getElementById('empty-state').classList.remove('hidden');
+    document.getElementById('tr-tbl').classList.add('hidden');
+    updateButtons(); return;
+  }
+  try{
+    const r = await fetch(`/api/projects/${pid}`);
+    const p = await safeJson(r);
+    if(!r.ok) throw new Error(p.error || 'Ошибка');
+    curPid = pid; curSegs = p.segments || [];
+    renderTable();
+    updateButtons();
+  } catch(e){ toast('Ошибка: ' + e.message, 'err') }
+}
+
+function updateButtons(){
+  const hasProj  = !!curPid;
+  const hasSegs  = curSegs.length > 0;
+  const hasTr    = curSegs.some(s => s.translation);
+  document.getElementById('btn-translate').disabled = !(hasProj && hasSegs && nllbReady);
+  document.getElementById('btn-clear').disabled     = !(hasProj && hasTr);
+  // Export buttons — only useful when project is selected
+  document.querySelectorAll('.btn-exp').forEach(b => b.disabled = !hasProj);
+}
+
+// ═══════════════════════════════════════════════════════════
+// TABLE RENDER
+// ═══════════════════════════════════════════════════════════
+function renderTable(){
+  const empty = document.getElementById('empty-state');
+  const tbl   = document.getElementById('tr-tbl');
+  if(!curSegs.length){
+    empty.innerHTML = `
+      <div class="es-icon">📋</div>
+      <div class="es-t">Нет реплик</div>
+      <div class="es-s">В этом проекте нет транскрипции. Сначала выполните транскрибацию в главном окне.</div>`;
+    empty.classList.remove('hidden'); tbl.classList.add('hidden'); return;
+  }
+  empty.classList.add('hidden'); tbl.classList.remove('hidden');
+  document.getElementById('tr-body').innerHTML = curSegs.map(s => `
+    <tr class="tr-row">
+      <td class="ts-cell">${escH(s.start_ts)}</td>
+      <td class="ts-cell">${escH(s.end_ts)}</td>
+      <td class="orig-cell">${escH(s.text)}</td>
+      <td class="${s.translation ? 'trnl-cell' : 'empty-tr'}">${s.translation ? escH(s.translation) : '—'}</td>
+    </tr>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════════
+// TRANSLATE
+// ═══════════════════════════════════════════════════════════
+async function startTranslate(){
+  if(!curPid) return;
+  const src = document.getElementById('sel-src').value;
+  const tgt = document.getElementById('sel-tgt').value;
+  if(src === tgt){ toast('Язык оригинала и перевода совпадают', 'err'); return; }
+
+  document.getElementById('btn-translate').disabled = true;
+  document.getElementById('prog-wrap').classList.add('visible');
+  document.getElementById('prog-txt').textContent = 'Запуск перевода...';
+  document.getElementById('prog-fill').style.width = '2%';
+
+  try{
+    const r = await fetch(`/api/projects/${curPid}/translate`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_key: 'nllb-600m', src_lang: src, tgt_lang: tgt})
+    });
+    const d = await safeJson(r);
+    if(!r.ok) throw new Error(d.error || 'Ошибка запуска');
+    pollProgress();
+  } catch(e){
+    toast(e.message, 'err');
+    document.getElementById('prog-wrap').classList.remove('visible');
+    document.getElementById('btn-translate').disabled = false;
+  }
+}
+
+function pollProgress(){
+  if(pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try{
+      const r  = await fetch(`/api/projects/${curPid}/translate/status`);
+      const st = await safeJson(r);
+      const pct = st.total > 0 ? Math.round(st.done / st.total * 100) : 0;
+      document.getElementById('prog-fill').style.width = pct + '%';
+      document.getElementById('prog-txt').textContent =
+        `Переводится... ${st.done}/${st.total} реплик (${pct}%)`;
+
+      if(st.status === 'done'){
+        clearInterval(pollTimer); pollTimer = null;
+        curSegs = st.segments || curSegs;
+        renderTable(); updateButtons();
+        document.getElementById('prog-fill').style.width = '100%';
+        document.getElementById('prog-txt').textContent = `Готово! ${st.total} реплик переведено`;
+        setTimeout(() => document.getElementById('prog-wrap').classList.remove('visible'), 2500);
+        document.getElementById('btn-translate').disabled = false;
+        toast(`Перевод завершён (${st.total} реплик)`, 'ok');
+        await loadProjects();
+      } else if(st.status === 'error'){
+        clearInterval(pollTimer); pollTimer = null;
+        toast('Ошибка перевода: ' + (st.error || '?'), 'err');
+        document.getElementById('prog-wrap').classList.remove('visible');
+        document.getElementById('btn-translate').disabled = false;
+      }
+    } catch(e){ console.error('pollProgress:', e) }
+  }, 2000);
+}
+
+async function clearTranslation(){
+  if(!curPid) return;
+  if(!confirm('Удалить все переводы из проекта?')) return;
+  try{
+    const r = await fetch(`/api/projects/${curPid}/translation/clear`, {method:'POST'});
+    const d = await safeJson(r);
+    if(!r.ok) throw new Error(d.error || 'Ошибка');
+    curSegs = curSegs.map(s => { const c = {...s}; delete c.translation; return c; });
+    renderTable(); updateButtons();
+    toast('Переводы удалены', 'info');
+    await loadProjects();
+  } catch(e){ toast(e.message, 'err') }
+}
+
+// ═══════════════════════════════════════════════════════════
+// EXPORT
+// ═══════════════════════════════════════════════════════════
+function exp(fmt){
+  if(!curPid) return;
+  const a = document.createElement('a');
+  a.href = `/api/projects/${curPid}/export/${fmt}`;
+  a.download = ''; document.body.appendChild(a); a.click(); a.remove();
+  toast(`Экспорт ${fmt.toUpperCase()}...`, 'info');
+}
+
+// ═══════════════════════════════════════════════════════════
+// REFRESH
+// ═══════════════════════════════════════════════════════════
+// Периодически проверяем статус NLLB (вдруг скачали в главном окне)
+setInterval(checkNllb, 30000);
+// Обновляем список проектов каждые 15 сек
+setInterval(async () => {
+  await loadProjects();
+  if(curPid) {
+    const opt = document.querySelector(`#sel-proj option[value="${curPid}"]`);
+    if(opt) document.getElementById('sel-proj').value = curPid;
+  }
+}, 15000);
+
+init();
+</script>
+</body>
+</html>

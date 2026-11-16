@@ -1,0 +1,19 @@
+flask
+flask-cors
+openai-whisper
+faster-whisper
+ffmpeg-python
+python-docx
+numpy
+transformers
+accelerate
+pyctcdecode
+pywebview
+demucs
+soundfile
+yt-dlp
+# torch и torchaudio НЕ здесь — их ставит setup.ps1 отдельным шагом с
+# автоопределением видеокарты (CUDA-сборка при наличии NVIDIA GPU, иначе
+# обычная CPU-сборка). Обычный "pip install torch" без --index-url на
+# практике ставит CPU-only сборку даже на машинах с NVIDIA-картой — Demucs
+# и распознавание тогда работают на процессоре, хотя GPU простаивает.

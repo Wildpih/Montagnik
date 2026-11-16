@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak
+*.tmp
+
+# Embedded runtime & binaries (gigabytes)
+python/
+ffmpeg/
+
+# ML models & cached weights (CTranslate2, Hugging Face, Demucs, etc.)
+models/
+
+# User data & working media
+projects/
+uploads/
+separated/
+exports/
+
+# Runtime stats & user configs
+speed_stats.json
+settings.json
+cookies.txt
+*.log
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# IDEs & editors
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
