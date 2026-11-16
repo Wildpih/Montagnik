@@ -552,9 +552,10 @@ body{
               <div style="display:flex;align-items:center;gap:8px;width:100%;padding:0 12px">
                 <button class="btn btn-ghost btn-sm" id="btn-play-g" onclick="togglePlay()">▶</button>
                 <div class="p-time" id="p-cur">00:00:00</div>
-                <div class="scrubber" id="scrubber" onclick="onScrub(event)" style="flex:1">
+                <div class="scrubber" id="scrubber" onclick="onScrub(event)" style="flex:1;position:relative">
                   <div id="scr-fill" style="width:0%"></div>
                   <div id="scr-thumb" style="left:0%"></div>
+                  <div id="scr-mark" style="display:none;position:absolute;top:0;bottom:0;width:3px;background:var(--amber);box-shadow:0 0 8px var(--amber);border-radius:1px;z-index:3;pointer-events:none"></div>
                 </div>
                 <div class="p-time" id="p-tot">00:00:00</div>
                 <!-- Volume control -->
@@ -573,6 +574,15 @@ body{
                   <option value="1.75">1.75×</option>
                   <option value="2">2×</option>
                 </select>
+                <!-- Add replica In/Out point -->
+                <div style="display:flex;align-items:center;gap:3px;margin-left:2px">
+                  <button class="btn btn-ghost btn-sm" id="btn-mark-seg" onclick="toggleMarkSegment()"
+                    title="Отметить начало/конец реплики [Горячие клавиши: [ или M]"
+                    style="font-size:11px;padding:3px 8px;white-space:nowrap;border:1px solid var(--border)">⏺ Реплика</button>
+                  <button class="btn btn-ghost btn-sm" id="btn-mark-cancel" onclick="cancelMarkSegment()"
+                    title="Сбросить метку начала реплики [Esc]"
+                    style="display:none;font-size:11px;padding:3px 5px;color:var(--red)">✕</button>
+                </div>
               </div>
             </div>
             <div id="video-panel" class="hidden">
@@ -601,6 +611,7 @@ body{
           <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0;flex-wrap:wrap;position:relative">
             <button class="btn-exp" id="btn-toc" onclick="toggleTocMenu()">📑 Оглавление</button>
             <div id="toc-menu" class="hidden" style="position:absolute;top:100%;left:10px;margin-top:4px;min-width:240px;max-width:360px;max-height:340px;overflow-y:auto;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:50;padding:6px"></div>
+            <button class="btn-exp" id="btn-mark-seg-bar" onclick="toggleMarkSegment()" title="Отметить начало/конец новой реплики [Горячие клавиши: [ или M]" style="border-color:var(--accent);color:var(--accent2)">⏺ Новая реплика</button>
             <span class="tlbl">Экспорт:</span>
             <button class="btn-exp" onclick="exp('csv')">📄 CSV</button>
             <button class="btn-exp" onclick="exp('srt')">📺 SRT</button>
@@ -823,9 +834,15 @@ body{
     <div style="max-width:680px;margin:0 auto;padding:28px 24px;display:flex;flex-direction:column;gap:24px">
 
       <!-- Header -->
-      <div>
-        <div style="font-size:20px;font-weight:800;color:var(--text);margin-bottom:4px">▶ Скачать с YouTube</div>
-        <div style="font-size:12px;color:var(--text3)">Вставьте ссылку — выберите качество — скачайте или сразу откройте как проект</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:20px;font-weight:800;color:var(--text);margin-bottom:4px">▶ Скачать с YouTube</div>
+          <div style="font-size:12px;color:var(--text3)">Вставьте ссылку — выберите качество — скачайте или сразу откройте как проект</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;background:var(--bg2);padding:4px 10px;border-radius:20px;border:1px solid var(--border);font-size:11px">
+          <span id="yt-version-badge" style="color:var(--text2)">yt-dlp: проверка...</span>
+          <button id="yt-update-btn" class="btn btn-ghost btn-sm" onclick="ytCheckUpdate(true)" title="Проверить и обновить yt-dlp" style="padding:2px 8px;font-size:10px;height:22px">🔄 Обновить</button>
+        </div>
       </div>
 
       <!-- URL -->
@@ -1053,7 +1070,7 @@ function switchPage(name){
   if(btn) btn.classList.add('active');
   if(name==='models') switchModelsTab(_modelsTab);
   if(name==='hub') hubOnShow();
-  if(name==='youtube'){ const u=document.getElementById('yt-url');if(u&&!u.value){}}
+  if(name==='youtube'){ ytCheckUpdate(false); }
 }
 
 function switchWsTab(tab){
@@ -1565,16 +1582,18 @@ function _doHighlight(t){
     }
   }
 }
-let _suppressSeekSync=false; // подавляет коррекцию звука сразу после намеренной перемотки (playSeg/onScrub) — включаем обратно, как только видео подтвердит, что реально доехало до места
+let _suppressSeekSync=false;
+let _seekTimeout=null;
+
 function onVidTimeUpdate(){
   if(!_vidIsActive||!vid.duration) return;
-  // Мастер-часы — звук (<audio>): именно он слышен, и любое его переставление
-  // на слух превращается в заикание/треск. Видео подстраивается под звук, а не
-  // наоборот. Раньше при отставании видео (медленное декодирование) звук
-  // постоянно дёргали назад к времени видео — отсюда «плохой звук».
+  // Мастер-часы — звук (<audio>). Если аудио в процессе перемотки (seeking)
+  // или буферизации, не дёргаем видео к промежуточному времени, чтобы
+  // исключить пропадание первых 0.5с звука.
+  if(aud.seeking) return;
   const t=aud.currentTime;
-  if(!_suppressSeekSync && !vid.seeking && Math.abs(vid.currentTime-t)>0.5) vid.currentTime=t;
-  if(_segStop!==null && t>=_segStop){ vid.pause(); _segStop=null; }
+  if(!_suppressSeekSync && !vid.seeking && Math.abs(vid.currentTime-t)>0.4) vid.currentTime=t;
+  if(_segStop!==null && t>=_segStop){ vid.pause(); aud.pause(); _segStop=null; }
   _doHighlight(t);
 }
 function onVidPlay(){ if(_vidIsActive && aud.paused) aud.play().catch(()=>{}); }
@@ -1586,16 +1605,7 @@ function onVidPause(){
 }
 function onVidSeeked(){
   if(_vidIsActive){
-    // Раньше здесь была принудительная синхронизация aud.currentTime=vid.currentTime
-    // (затем — с порогом 0.4с). Проблема глубже: перемотка <video> к позиции не на
-    // ключевом кадре может занимать заметно больше 0.4с на декодирование, пока
-    // картинка "висит" на старом кадре — а <audio> к этому моменту уже играет
-    // корректно с нужного места. Любая попытка что-то досинхронизировать в этот
-    // момент отматывает уже проигранный звук назад — отсюда "дублирование".
-    // Раз при явной перемотке (playSeg/onScrub) мы и так выставляем оба currentTime
-    // на правильное значение заранее, здесь достаточно просто снять подавление
-    // коррекции и ничего больше не трогать.
-    _suppressSeekSync=false;
+    if(!aud.seeking) _suppressSeekSync=false;
     _lastActiveRowId=null;
   }
 }
@@ -1611,9 +1621,6 @@ function setSpeed(v){
   vid.playbackRate=_playbackSpeed;
 }
 function _applyStoredSpeed(){
-  // Вызывается после смены src у aud/vid (новый проект, переключение
-  // видео/аудио режима, смена дорожки) — playbackRate иначе сбрасывается
-  // на 1× при загрузке нового медиа-ресурса.
   aud.playbackRate=_playbackSpeed;
   vid.playbackRate=_playbackSpeed;
 }
@@ -1642,30 +1649,48 @@ function initAudioEvents(){
     _segStop = null;
     document.getElementById('btn-play-g').textContent = '▶';
     if(cur && cur.has_video) vid.pause();
-    // Снимаем подсветку
     document.querySelectorAll('.seg-row.playing').forEach(r => r.classList.remove('playing'));
     _lastActiveRowId = null;
   });
   aud.addEventListener('play',  ()=> document.getElementById('btn-play-g').textContent = '⏸');
   aud.addEventListener('pause', ()=> document.getElementById('btn-play-g').textContent = '▶');
+
+  // Устранение бага пропадания первых 0.5с звука:
+  // Если звук ушёл на подгрузку/буферизацию — видео не должно убегать вперёд без звука
+  aud.addEventListener('waiting', ()=>{
+    if(_vidIsActive && !vid.paused){
+      vid.pause();
+    }
+  });
+  aud.addEventListener('playing', ()=>{
+    if(_vidIsActive && vid.paused && document.getElementById('btn-play-g')?.textContent === '⏸'){
+      vid.play().catch(()=>{});
+    }
+  });
+  aud.addEventListener('seeked', ()=>{
+    _suppressSeekSync = false;
+  });
 }
 
 function togglePlay(){
   _segStop = null;
   if(_vidIsActive){
     if(vid.paused){
-      // aud несёт реальный звук (vid всегда без звука — см. setVideoMode).
-      // Запускаем оба .play() прямо здесь, синхронно в обработчике клика:
-      // если полагаться только на onVidPlay (который срабатывает из
-      // события 'play' у <video>, т.е. уже вне стека клика), самый первый
-      // за сессию запуск звука на странице политика автовоспроизведения
-      // браузера может тихо отклонить (промис из .catch(()=>{}) глотает
-      // ошибку) — и в первый раз звука не будет вовсе.
+      // При возобновлении воспроизведения выравниваем видео и аудио
+      if(!vid.seeking && !aud.seeking && Math.abs(vid.currentTime - aud.currentTime) > 0.08){
+        aud.currentTime = vid.currentTime;
+      }
+      _suppressSeekSync = true;
+      clearTimeout(_seekTimeout);
+      _seekTimeout = setTimeout(()=>{ _suppressSeekSync=false; }, 400);
       vid.play().catch(()=>{});
       aud.play().catch(()=>{});
-    } else vid.pause();
+    } else {
+      vid.pause();
+      aud.pause();
+    }
   } else {
-    if(aud.paused) aud.play(); else aud.pause();
+    if(aud.paused) aud.play().catch(()=>{}); else aud.pause();
   }
 }
 
@@ -1675,7 +1700,8 @@ function onScrub(e){
   const pct = (e.clientX - r.left) / r.width;
   if(aud.duration){
     _suppressSeekSync = true;
-    setTimeout(()=>{ _suppressSeekSync=false; }, 2000); // страховка: если 'seeked' почему-то не придёт
+    clearTimeout(_seekTimeout);
+    _seekTimeout = setTimeout(()=>{ _suppressSeekSync=false; }, 1500);
     aud.currentTime = pct * aud.duration;
     if(cur && cur.has_video) vid.currentTime = aud.currentTime;
   }
@@ -1685,14 +1711,123 @@ function playSeg(id){
   const s = cur.segments.find(x => x.id === id);
   if(!s) return;
   _segStop = s.end;
+  // Небольшой pre-roll 0.08с перед началом реплики: убирает "съеденные" начальные звуки
+  // и гарантирует, что декодер успеет выдать звук с самого первого слога без задержки
+  const startT = Math.max(0, s.start - 0.08);
+  _suppressSeekSync = true;
+  clearTimeout(_seekTimeout);
+  _seekTimeout = setTimeout(()=>{ _suppressSeekSync=false; }, 1500);
+
   if(_vidIsActive){
-    _suppressSeekSync = true;
-    setTimeout(()=>{ _suppressSeekSync=false; }, 2000); // страховка: если 'seeked' почему-то не придёт
-    vid.currentTime = s.start; aud.currentTime = s.start;
+    vid.currentTime = startT;
+    aud.currentTime = startT;
     vid.play().catch(()=>{});
-    aud.play().catch(()=>{}); // синхронно здесь же — см. комментарий в togglePlay
+    aud.play().catch(()=>{});
   } else {
-    aud.currentTime = s.start; aud.play();
+    aud.currentTime = startT;
+    aud.play().catch(()=>{});
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// РУЧНОЕ ДОБАВЛЕНИЕ РЕПЛИК (МЕТКА НАЧАЛА / ЗАКРЫТИЕ РЕПЛИКИ)
+// ═══════════════════════════════════════════════════════════════════════
+let _markInTime = null;
+
+function toggleMarkSegment(){
+  if(!cur || !cur.id) return;
+  const t = _vidIsActive ? (vid.currentTime || 0) : (aud.currentTime || 0);
+  if(_markInTime === null){
+    // 1. Ставим точку начала
+    _markInTime = Math.max(0, t);
+    _updateMarkUI();
+    toast(`⏺ Точка начала: ${fmtS(_markInTime)}. Дослушайте до конца реплики и нажмите кнопку ещё раз (или клавишу ']')`, 'info');
+  } else {
+    // 2. Закрываем реплику и создаём сегмент
+    let t0 = Math.min(_markInTime, t);
+    let t1 = Math.max(_markInTime, t);
+    if(t1 - t0 < 0.2){
+      t1 = t0 + 0.6; // минимальная длительность реплики
+    }
+    const newId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('seg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8));
+    const newSeg = {
+      id: newId,
+      start: Math.round(t0 * 1000) / 1000,
+      end: Math.round(t1 * 1000) / 1000,
+      start_ts: s2ts(t0),
+      end_ts: s2ts(t1),
+      text: "",
+      character: ""
+    };
+    cancelMarkSegment(false);
+    if(!cur.segments) cur.segments = [];
+    pushHistory();
+    cur.segments.push(newSeg);
+    cur.segments.sort((a,b) => a.start - b.start);
+    renderSegments();
+    saveProjRemote();
+
+    // Прокручиваем к созданной строке и открываем поле ввода текста
+    setTimeout(()=>{
+      const row = document.getElementById(`row-${newSeg.id}`);
+      if(row){
+        row.scrollIntoView({block:'center', behavior:'smooth'});
+        row.classList.add('playing');
+        setTimeout(()=>row.classList.remove('playing'), 1800);
+      }
+      editTxt(newSeg.id);
+    }, 80);
+    toast('✅ Реплика создана! Введите текст или нажмите 🔄 для распознавания нейросетью', 'ok');
+  }
+}
+
+function cancelMarkSegment(showToast = true){
+  _markInTime = null;
+  _updateMarkUI();
+  if(showToast) toast('Метка начала реплики сброшена', 'info');
+}
+
+function _updateMarkUI(){
+  const btn1 = document.getElementById('btn-mark-seg');
+  const btn2 = document.getElementById('btn-mark-seg-bar');
+  const cancelBtn = document.getElementById('btn-mark-cancel');
+  const scrMark = document.getElementById('scr-mark');
+
+  if(_markInTime !== null){
+    const label = `⏹ Закрыть (${fmtS(_markInTime)})`;
+    if(btn1){
+      btn1.innerHTML = label;
+      btn1.style.background = 'var(--amber-dim)';
+      btn1.style.color = 'var(--amber)';
+      btn1.style.borderColor = 'var(--amber)';
+    }
+    if(btn2){
+      btn2.innerHTML = label;
+      btn2.style.background = 'var(--amber-dim)';
+      btn2.style.color = 'var(--amber)';
+      btn2.style.borderColor = 'var(--amber)';
+    }
+    if(cancelBtn) cancelBtn.style.display = 'inline-block';
+    if(scrMark && aud.duration){
+      const pct = (_markInTime / aud.duration) * 100;
+      scrMark.style.left = pct + '%';
+      scrMark.style.display = 'block';
+    }
+  } else {
+    if(btn1){
+      btn1.innerHTML = '⏺ Реплика';
+      btn1.style.background = '';
+      btn1.style.color = '';
+      btn1.style.borderColor = '';
+    }
+    if(btn2){
+      btn2.innerHTML = '⏺ Новая реплика';
+      btn2.style.background = '';
+      btn2.style.color = '';
+      btn2.style.borderColor = '';
+    }
+    if(cancelBtn) cancelBtn.style.display = 'none';
+    if(scrMark) scrMark.style.display = 'none';
   }
 }
 
@@ -2851,8 +2986,90 @@ document.addEventListener('keydown',e=>{
   if(e.ctrlKey&&(e.key==='y'||(e.key==='z'&&e.shiftKey))){e.preventDefault();redo();return;}
   if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
   if(e.code==='Space'){e.preventDefault();togglePlay();}
-  if(e.key==='Escape')closeSplit();
+  if(e.key==='Escape'){
+    if(_markInTime !== null){
+      cancelMarkSegment();
+      return;
+    }
+    closeSplit();
+  }
+  // Добавление реплики по горячим клавишам: [ / M / ]
+  if(e.key==='[' || e.key==='m' || e.key==='M' || e.code==='KeyM'){
+    if(cur && cur.id && document.getElementById('row-main')?.classList.contains('visible')){
+      e.preventDefault();
+      toggleMarkSegment();
+      return;
+    }
+  }
+  if(e.key===']'){
+    if(cur && cur.id && _markInTime !== null){
+      e.preventDefault();
+      toggleMarkSegment();
+      return;
+    }
+  }
 });
+
+let _ytUpdating = false;
+async function ytCheckUpdate(force = false){
+  const badge = document.getElementById('yt-version-badge');
+  const btn = document.getElementById('yt-update-btn');
+  if(!badge) return;
+  try{
+    if(force){
+      _ytUpdating = true;
+      if(btn) { btn.disabled = true; btn.textContent = '⏳'; }
+      badge.textContent = 'yt-dlp: обновление...';
+      badge.style.color = 'var(--amber)';
+      toast('Проверка и обновление yt-dlp...', 'info');
+      await fetch('/api/youtube/update', {method: 'POST'});
+      let attempts = 0;
+      while(attempts < 40){
+        await new Promise(r => setTimeout(r, 1500));
+        attempts++;
+        const r = await fetch('/api/youtube/version');
+        const st = await r.json();
+        if(st.status === 'updated'){
+          badge.textContent = `yt-dlp v${st.version} (актуальна)`;
+          badge.style.color = 'var(--green)';
+          toast(`✅ yt-dlp обновлён до версии ${st.version}`, 'ok');
+          break;
+        } else if(st.status === 'error'){
+          badge.textContent = `yt-dlp v${st.version || 'err'} (ошибка)`;
+          badge.style.color = 'var(--red)';
+          toast(`Ошибка обновления yt-dlp: ${st.last_error}`, 'err');
+          break;
+        }
+      }
+      if(btn) { btn.disabled = false; btn.textContent = '🔄 Обновить'; }
+      _ytUpdating = false;
+      return;
+    }
+
+    const r = await fetch('/api/youtube/version');
+    const st = await r.json();
+    if(st.status === 'updating'){
+      badge.textContent = 'yt-dlp: обновление...';
+      badge.style.color = 'var(--amber)';
+      if(btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    } else if(st.latest && st.version && st.latest !== st.version){
+      badge.textContent = `yt-dlp v${st.version} (есть ${st.latest})`;
+      badge.style.color = 'var(--amber)';
+      if(btn) { btn.disabled = false; btn.textContent = '⚡ Обновить'; }
+    } else if(st.version){
+      badge.textContent = `yt-dlp v${st.version} (актуальна)`;
+      badge.style.color = 'var(--green)';
+      if(btn) { btn.disabled = false; btn.textContent = '🔄 Обновить'; }
+    } else {
+      badge.textContent = 'yt-dlp: готов';
+      badge.style.color = 'var(--text2)';
+    }
+  }catch(e){
+    if(badge) badge.textContent = 'yt-dlp';
+  }finally{
+    if(!_ytUpdating && btn) { btn.disabled = false; }
+  }
+}
 
 
 

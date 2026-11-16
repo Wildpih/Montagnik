@@ -951,17 +951,38 @@ def _adaptive_pause(words: list, user_pause: float) -> float:
 # что видно в примере "Субтитры сделал DimaTorzok Субтитры сделал DimaTorzok").
 # Пороги — стандартные дефолты самого Whisper для этих же целей.
 _HALLUCINATION_PHRASES = (
-    "субтитры сделал dimatorzok", "субтитры делал dimatorzok",
+    "dimatorzok", "dima torzok", "дима торзок", "диматорзок", "torzok",
+    "субтитры сделал", "субтитры делал", "субтитры создавал", "субтитры добавил",
+    "субтитры подготовил", "субтитры подготовлены", "субтитры перевел", "субтитры перевёл",
     "редактор субтитров", "корректор а.egorova", "корректор а.синецкая",
     "продолжение следует", "untertitelung des zdf", "amara.org community",
-    "субтитры создавал", "фондтелевидения", "субтитры подготовлены",
+    "фондтелевидения", "подпишись на канал", "подписывайтесь на канал",
+    "ставьте лайк", "спасибо за просмотр", "до новых встреч", "переведено и озвучено",
 )
+
+def _is_hallucination_text(text: str) -> bool:
+    if not text:
+        return False
+    t_low = text.lower().strip()
+    # Нормализуем разделители, знаки и пробелы
+    t_clean = re.sub(r'[\s.,!?;:…\-_/\\|]+', ' ', t_low).strip()
+    if not t_clean:
+        return False
+    # Любое упоминание DimaTorzok в любом регистре, раздельно или слитно
+    if any(k in t_clean for k in ("dimatorzok", "dima torzok", "дима торзок", "диматорзок", "torzok")):
+        return True
+    if any(p in t_clean for p in _HALLUCINATION_PHRASES):
+        return True
+    if _has_immediate_repeat(t_clean):
+        return True
+    return False
+
 def _looks_hallucinated(seg) -> bool:
     get = (lambda k, d=0: seg.get(k, d)) if isinstance(seg, dict) else (lambda k, d=0: getattr(seg, k, d))
-    text_low = (get("text", "") or "").strip().lower()
-    if not text_low:
+    text = (get("text", "") or "").strip()
+    if not text:
         return False
-    if any(p in text_low for p in _HALLUCINATION_PHRASES):
+    if _is_hallucination_text(text):
         return True
     stat_suspect = (get("no_speech_prob", 0) > 0.6 and get("avg_logprob", 0) < -1.0) \
                    or get("compression_ratio", 0) > 2.4
@@ -1062,7 +1083,7 @@ def group_words(words: list, pause: float, speaker_changes: list | None = None,
         # известные фразы/повторы текста, и — самое надёжное — проверка,
         # что под текстом вообще есть звук.
         text_low = text.lower()
-        if any(p in text_low for p in _HALLUCINATION_PHRASES) or _has_immediate_repeat(text_low):
+        if _is_hallucination_text(text) or any(p in text_low for p in _HALLUCINATION_PHRASES) or _has_immediate_repeat(text_low):
             continue
         if is_near_silent(sg[0]["start"], sg[-1]["end"]):
             continue
@@ -1086,6 +1107,55 @@ def apply_padding(segments: list, padding: float, audio_duration: float) -> list
         result.append({**seg, "start": round(ns,3), "end": round(ne,3),
                         "start_ts": s2ts(ns), "end_ts": s2ts(ne)})
     return result
+
+def _recover_hallucinated_slice(model, audio: np.ndarray, t_start: float, t_end: float, lang: str | None) -> list:
+    """Пытается до последнего распознать фрагмент аудио, на котором Whisper выдал галлюцинацию
+    (например, 'Субтитры сделал DimaTorzok'). Передаёт срез audio напрямую в faster-whisper
+    с параметрами condition_on_previous_text=False, температурой и без зацикливающего контекста."""
+    try:
+        if audio is None or (t_end - t_start) < 0.15:
+            return []
+        pad = 0.08
+        s_pad = max(0.0, t_start - pad)
+        e_pad = min(len(audio) / 16000.0, t_end + pad)
+        i0, i1 = int(s_pad * 16000), int(e_pad * 16000)
+        chunk = audio[i0:i1]
+        if len(chunk) < 2400:
+            return []
+
+        strategies = [
+            {"condition_on_previous_text": False, "temperature": 0.2, "beam_size": 5},
+            {"condition_on_previous_text": False, "temperature": [0.0, 0.4, 0.8], "beam_size": 3},
+            {"condition_on_previous_text": False, "temperature": 0.6, "beam_size": 1},
+        ]
+        for strat in strategies:
+            try:
+                segs_gen, _ = model.transcribe(
+                    chunk, language=lang, word_timestamps=True,
+                    vad_filter=False,
+                    **strat
+                )
+                recovered = []
+                has_hallucination = False
+                for s in segs_gen:
+                    if _looks_hallucinated(s):
+                        has_hallucination = True
+                        break
+                    for w in (s.words or []):
+                        wt = w.word.strip()
+                        if wt and not _is_hallucination_text(wt):
+                            recovered.append({
+                                "word": wt,
+                                "start": s_pad + w.start,
+                                "end": s_pad + w.end,
+                            })
+                if not has_hallucination and recovered:
+                    return recovered
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[RECOVERY ERR] {e}")
+    return []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Транскрибация
@@ -1116,30 +1186,45 @@ def transcribe(wav: Path, key: str, lang: str, pause: float, prompt: str = "",
     if arch == "faster_whisper":
         _, m = get_model(key, force_device); l = None if lang == "auto" else lang
         _tick(1, "Загрузка модели")
+        audio = load_wav(wav)
         segments_gen, audio_info = m.transcribe(
             str(wav), language=l, word_timestamps=True,
             initial_prompt=prompt if prompt else None,
             vad_filter=True,   # встроенный VAD (Silero) — режет тишину/шум,
-                                # не даёт модели "галлюцинировать" текст на
-                                # пустых участках длинных записей
             hallucination_silence_threshold=2.0,  # доп. защита от галлюцинаций
-                                # именно на длинных паузах — встроенная фича
-                                # faster-whisper для ровно этого случая
         )
         words = []
         total_dur = audio_info.duration if audio_info and audio_info.duration else None
+
+        def _chunk_rms(t0: float, t1: float) -> float:
+            if audio is None: return 0.0
+            i0, i1 = int(t0 * 16000), int(t1 * 16000)
+            chunk = audio[max(0, i0):min(len(audio), i1)]
+            if len(chunk) == 0: return 0.0
+            return float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+
         for seg in segments_gen:
             if _looks_hallucinated(seg):
-                _tick(100.0 * seg.end / total_dur if total_dur else 1)
-                continue  # пропускаем весь сегмент — не добавляем его слова
+                # Добиваемся ответа до последнего: если под участком есть реальный звук,
+                # пробуем восстановить речь без зацикленного контекста
+                t0, t1 = seg.start, seg.end
+                rms = _chunk_rms(t0, t1)
+                recovered_words = []
+                if rms >= 0.004 and (t1 - t0) >= 0.2:
+                    recovered_words = _recover_hallucinated_slice(m, audio, t0, t1, l)
+                if recovered_words:
+                    words.extend(recovered_words)
+                if total_dur:
+                    _tick(100.0 * seg.end / total_dur)
+                continue
             for w in (seg.words or []):
                 word = w.word.strip()
-                if word: words.append({"word": word, "start": w.start, "end": w.end})
+                if word and not _is_hallucination_text(word):
+                    words.append({"word": word, "start": w.start, "end": w.end})
             if total_dur:
                 _tick(100.0 * seg.end / total_dur)
             elif cancel_check and cancel_check():
                 raise TranscribeCancelled()
-        audio = load_wav(wav)
         return group_words(words, pause, detect_speaker_changes(audio), audio)
 
     if arch == "whisper":
@@ -1579,11 +1664,51 @@ def api_upload(pid):
 # ─────────────────────────────────────────────────────────────────────────────
 # API — Медиа
 # ─────────────────────────────────────────────────────────────────────────────
+def _send_audio_range(path: Path) -> Response:
+    """Отдаёт аудиофайл с поддержкой HTTP Range (206 Partial Content),
+    быстрым chunked-потоком и кэшированием, чтобы перемотка в огромных WAV-файлах
+    (сотни мегабайт) происходила мгновенно и без задержек в WebView2."""
+    fs = path.stat().st_size
+    rh = request.headers.get("Range")
+    if rh:
+        b1, b2 = 0, None
+        parts = rh.replace("bytes=", "").split("-")
+        b1 = int(parts[0])
+        if parts[1]:
+            b2 = int(parts[1])
+        if b2 is None:
+            b2 = fs - 1
+        length = b2 - b1 + 1
+
+        def gen():
+            with open(path, "rb") as fh:
+                fh.seek(b1)
+                rem = length
+                while rem:
+                    chunk = fh.read(min(131072, rem))
+                    if not chunk:
+                        break
+                    rem -= len(chunk)
+                    yield chunk
+
+        resp = Response(gen(), 206, mimetype="audio/wav", direct_passthrough=True)
+        resp.headers.update({
+            "Content-Range": f"bytes {b1}-{b2}/{fs}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+            "Cache-Control": "public, max-age=3600",
+        })
+        return resp
+    resp = send_file(str(path), mimetype="audio/wav", conditional=True)
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
 @app.route("/api/projects/<pid>/audio")
 def api_audio(pid):
     wav = UPLOAD_DIR / f"{pid}.wav"
     if not wav.exists(): return jsonify({"error":"Нет аудио"}), 404
-    return send_from_directory(str(UPLOAD_DIR), f"{pid}.wav", mimetype="audio/wav")
+    return _send_audio_range(wav)
 
 
 @app.route("/api/projects/<pid>/audio_variants")
@@ -1671,7 +1796,7 @@ def api_audio_variant_file(pid, variant):
 
     if not f.exists():
         return jsonify({"error": "Файл не найден"}), 404
-    return send_file(str(f), mimetype="audio/wav", as_attachment=False)
+    return _send_audio_range(f)
 
 
 @app.route("/api/projects/<pid>/active_audio_variant", methods=["POST"])
@@ -2169,7 +2294,20 @@ def api_retranscribe_segment(pid):
             _, m = get_model(mkey); l = None if lang=="auto" else lang
             segs_gen, _ai = m.transcribe(str(tmp_wav), language=l,
                                          initial_prompt=prompt if prompt else None)
-            new_text = " ".join(s.text.strip() for s in segs_gen).strip()
+            new_text = " ".join(s.text.strip() for s in segs_gen if not _looks_hallucinated(s)).strip()
+            if not new_text or _is_hallucination_text(new_text):
+                # Добиваемся ответа до последнего с альтернативными параметрами без зацикливания
+                try:
+                    retry_segs, _ = m.transcribe(str(tmp_wav), language=l,
+                                                 condition_on_previous_text=False,
+                                                 temperature=0.2, beam_size=5)
+                    cand = " ".join(s.text.strip() for s in retry_segs if not _looks_hallucinated(s)).strip()
+                    if cand and not _is_hallucination_text(cand):
+                        new_text = cand
+                except Exception:
+                    pass
+            if _is_hallucination_text(new_text):
+                new_text = ""
         elif arch == "whisper":
             import whisper as _whisper; _, m = get_model(mkey)
             l = None if lang=="auto" else lang
@@ -3052,7 +3190,7 @@ def _gen_docx_to_path(p: dict, out_path: Path, columns: list | None = None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# YOUTUBE DOWNLOAD
+# YOUTUBE DOWNLOAD & САМООБНОВЛЕНИЕ
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _yt_dlp_bin() -> str:
@@ -3062,6 +3200,137 @@ def _yt_dlp_bin() -> str:
     local2 = BASE_DIR / "python" / "bin" / "yt-dlp"
     if local2.exists(): return str(local2)
     return "yt-dlp"
+
+_ytdlp_state = {
+    "status": "idle",       # "idle", "checking", "updating", "updated", "error"
+    "version": "",
+    "latest": "",
+    "last_check": 0,
+    "last_error": "",
+}
+_ytdlp_lock = threading.Lock()
+
+def _get_installed_ytdlp_version() -> str:
+    try:
+        import yt_dlp
+        return str(getattr(yt_dlp.version, "__version__", ""))
+    except Exception:
+        return ""
+
+def _get_pypi_ytdlp_version() -> str | None:
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/yt-dlp/json",
+            headers={"User-Agent": "TranscribeStudio-AutoUpdater/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("info", {}).get("version", "")
+    except Exception as e:
+        print(f"[YTDLP PYPI CHECK] {e}")
+        return None
+
+def _run_ytdlp_update_sync() -> tuple[bool, str]:
+    """Выполняет обновление yt-dlp до последней версии с PyPI и очищает кэш JS-плеера YouTube."""
+    with _ytdlp_lock:
+        if _ytdlp_state["status"] == "updating":
+            return False, "Обновление уже выполняется"
+        _ytdlp_state["status"] = "updating"
+        _ytdlp_state["last_error"] = ""
+
+    py_exe = sys.executable
+    try:
+        cmd = [py_exe, "-m", "pip", "install", "--upgrade", "yt-dlp"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or proc.stdout.strip() or "pip error"
+            with _ytdlp_lock:
+                _ytdlp_state["status"] = "error"
+                _ytdlp_state["last_error"] = err
+            return False, err
+
+        # Очистка кэша плеера YouTube (--rm-cache-dir)
+        try:
+            subprocess.run([py_exe, "-m", "yt_dlp", "--rm-cache-dir"],
+                           capture_output=True, text=True, timeout=15)
+        except Exception:
+            pass
+
+        # Перезагружаем модуль yt_dlp в памяти текущего процесса
+        try:
+            import importlib
+            if "yt_dlp" in sys.modules:
+                importlib.reload(sys.modules["yt_dlp"])
+            else:
+                import yt_dlp  # noqa
+        except Exception:
+            pass
+
+        new_ver = _get_installed_ytdlp_version()
+        with _ytdlp_lock:
+            _ytdlp_state["status"] = "updated"
+            _ytdlp_state["version"] = new_ver
+            _ytdlp_state["last_check"] = time.time()
+        print(f"[YTDLP] yt-dlp успешно обновлён до версии {new_ver}")
+        return True, new_ver
+    except Exception as e:
+        err = str(e)
+        with _ytdlp_lock:
+            _ytdlp_state["status"] = "error"
+            _ytdlp_state["last_error"] = err
+        return False, err
+
+def _bg_check_and_update_ytdlp(force: bool = False):
+    """Фоновая самопроверка и автообновление yt-dlp."""
+    def _worker():
+        cur_ver = _get_installed_ytdlp_version()
+        with _ytdlp_lock:
+            _ytdlp_state["version"] = cur_ver
+            now = time.time()
+            if not force and (now - _ytdlp_state["last_check"] < 43200): # 12 часов
+                return
+            _ytdlp_state["status"] = "checking"
+
+        latest = _get_pypi_ytdlp_version()
+        with _ytdlp_lock:
+            _ytdlp_state["latest"] = latest or ""
+            _ytdlp_state["last_check"] = time.time()
+
+        if latest and cur_ver and latest != cur_ver:
+            print(f"[YTDLP] Найдена свежая версия: {latest} (текущая: {cur_ver}). Автообновление...")
+            _run_ytdlp_update_sync()
+        elif force:
+            _run_ytdlp_update_sync()
+        else:
+            with _ytdlp_lock:
+                _ytdlp_state["status"] = "idle"
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+# Автозапуск фоновой проверки при старте сервера
+def _schedule_startup_ytdlp_check():
+    def _delayed():
+        time.sleep(2)
+        _bg_check_and_update_ytdlp(force=False)
+    threading.Thread(target=_delayed, daemon=True).start()
+
+_schedule_startup_ytdlp_check()
+
+@app.route("/api/youtube/version")
+def api_youtube_version():
+    """Возвращает информацию о текущей и последней версии yt-dlp."""
+    with _ytdlp_lock:
+        if not _ytdlp_state["version"]:
+            _ytdlp_state["version"] = _get_installed_ytdlp_version()
+        st = dict(_ytdlp_state)
+    return jsonify(st)
+
+@app.route("/api/youtube/update", methods=["POST"])
+def api_youtube_update():
+    """Запускает процесс обновления yt-dlp в фоне."""
+    _bg_check_and_update_ytdlp(force=True)
+    return jsonify({"ok": True, "status": "updating"})
 
 
 @app.route("/api/youtube/info", methods=["POST"])
@@ -3198,6 +3467,31 @@ def api_youtube_info():
             if info:
                 raw_info.update({k: v for k, v in info.items() if v})
             info = raw_info  # at minimum shows title/thumb even if formats empty
+
+        # Автоматическая попытка самолечения при устаревании yt-dlp:
+        # Если ни одна стратегия не сработала и есть ошибка плеера / авторизации / формата
+        if not info and last_err:
+            msg_low = str(last_err).lower()
+            if any(k in msg_low for k in ("page needs to be reloaded", "unplayable", "sign in", "bot", "403", "requested format")):
+                try:
+                    print("[YTDLP] Ошибка плеера YouTube — запускаю автообновление yt-dlp...")
+                    up_ok, _ = _run_ytdlp_update_sync()
+                    if up_ok:
+                        import importlib
+                        importlib.reload(yt_dlp)
+                        retry_opts = {**base_cookie_opts,
+                                      "extractor_args": {"youtube": {"player_client": ["android", "ios", "web_embedded", "web"]}},
+                                      "quiet": True, "no_warnings": True, "noplaylist": True}
+                        with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                            retry_raw = ydl.extract_info(clean_url, download=False, process=False)
+                            if retry_raw:
+                                try:
+                                    info = ydl.process_ie_result(dict(retry_raw), download=False)
+                                except Exception:
+                                    info = ydl.sanitize_info(retry_raw)
+                                last_err = None
+                except Exception as e_retry:
+                    print(f"[YTDLP RETRY ERR] {e_retry}")
 
         if not info:
             raise (last_err or RuntimeError("Не удалось получить информацию о видео"))
@@ -3590,6 +3884,18 @@ def api_youtube_download():
                     except Exception as exc2:
                         last_client_exc = exc2
                         continue
+                if not succeeded:
+                    try:
+                        with _yt_lock:
+                            _yt_status[pid].update({"stage": "Автообновление yt-dlp..."})
+                        up_ok, _ = _run_ytdlp_update_sync()
+                        if up_ok:
+                            import importlib
+                            importlib.reload(yt_dlp)
+                            _try_download(ydl_opts, url)
+                            succeeded = True
+                    except Exception as e_retry:
+                        print(f"[YTDLP DOWNLOAD RETRY ERR] {e_retry}")
                 if not succeeded:
                     raise last_client_exc
 
