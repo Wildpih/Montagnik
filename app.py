@@ -1670,35 +1670,39 @@ def _send_audio_range(path: Path) -> Response:
     (сотни мегабайт) происходила мгновенно и без задержек в WebView2."""
     fs = path.stat().st_size
     rh = request.headers.get("Range")
-    if rh:
-        b1, b2 = 0, None
-        parts = rh.replace("bytes=", "").split("-")
-        b1 = int(parts[0])
-        if parts[1]:
-            b2 = int(parts[1])
-        if b2 is None:
-            b2 = fs - 1
-        length = b2 - b1 + 1
+    if rh and "bytes=" in rh:
+        try:
+            parts = rh.replace("bytes=", "").split("-")
+            b1 = int(parts[0]) if parts[0].strip() else 0
+            b2 = int(parts[1]) if len(parts) > 1 and parts[1].strip() else (fs - 1)
+            b2 = min(b2, fs - 1)
+            if b1 >= fs or b1 > b2 or b1 < 0:
+                resp = Response(status=416)
+                resp.headers.update({"Content-Range": f"bytes */{fs}", "Accept-Ranges": "bytes"})
+                return resp
+            length = b2 - b1 + 1
 
-        def gen():
-            with open(path, "rb") as fh:
-                fh.seek(b1)
-                rem = length
-                while rem:
-                    chunk = fh.read(min(131072, rem))
-                    if not chunk:
-                        break
-                    rem -= len(chunk)
-                    yield chunk
+            def gen():
+                with open(path, "rb") as fh:
+                    fh.seek(b1)
+                    rem = length
+                    while rem > 0:
+                        chunk = fh.read(min(131072, rem))
+                        if not chunk:
+                            break
+                        rem -= len(chunk)
+                        yield chunk
 
-        resp = Response(gen(), 206, mimetype="audio/wav", direct_passthrough=True)
-        resp.headers.update({
-            "Content-Range": f"bytes {b1}-{b2}/{fs}",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(length),
-            "Cache-Control": "public, max-age=3600",
-        })
-        return resp
+            resp = Response(gen(), 206, mimetype="audio/wav", direct_passthrough=True)
+            resp.headers.update({
+                "Content-Range": f"bytes {b1}-{b2}/{fs}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(length),
+                "Cache-Control": "public, max-age=3600",
+            })
+            return resp
+        except Exception:
+            pass
     resp = send_file(str(path), mimetype="audio/wav", conditional=True)
     resp.headers["Accept-Ranges"] = "bytes"
     resp.headers["Cache-Control"] = "public, max-age=3600"
@@ -1907,25 +1911,44 @@ def api_video(pid):
     if not path.exists(): return jsonify({"error":"Файл не найден"}), 404
     mime = {".mp4":"video/mp4",".mov":"video/quicktime",".avi":"video/x-msvideo",
             ".mkv":"video/x-matroska",".webm":"video/webm"}.get(ext,"video/mp4")
-    fs = path.stat().st_size; rh = request.headers.get("Range")
-    if rh:
-        b1, b2 = 0, None; parts = rh.replace("bytes=","").split("-")
-        b1 = int(parts[0])
-        if parts[1]: b2 = int(parts[1])
-        if b2 is None: b2 = fs - 1
-        length = b2 - b1 + 1
-        def gen():
-            with open(path,"rb") as fh:
-                fh.seek(b1); rem = length
-                while rem:
-                    chunk = fh.read(min(65536,rem))
-                    if not chunk: break
-                    rem -= len(chunk); yield chunk
-        resp = Response(gen(), 206, mimetype=mime, direct_passthrough=True)
-        resp.headers.update({"Content-Range":f"bytes {b1}-{b2}/{fs}",
-                              "Accept-Ranges":"bytes","Content-Length":str(length)})
-        return resp
-    return send_file(str(path), mimetype=mime)
+    fs = path.stat().st_size
+    rh = request.headers.get("Range")
+    if rh and "bytes=" in rh:
+        try:
+            parts = rh.replace("bytes=", "").split("-")
+            b1 = int(parts[0]) if parts[0].strip() else 0
+            b2 = int(parts[1]) if len(parts) > 1 and parts[1].strip() else (fs - 1)
+            b2 = min(b2, fs - 1)
+            if b1 >= fs or b1 > b2 or b1 < 0:
+                resp = Response(status=416)
+                resp.headers.update({"Content-Range": f"bytes */{fs}", "Accept-Ranges": "bytes"})
+                return resp
+            length = b2 - b1 + 1
+
+            def gen():
+                with open(path, "rb") as fh:
+                    fh.seek(b1)
+                    rem = length
+                    while rem > 0:
+                        chunk = fh.read(min(65536, rem))
+                        if not chunk:
+                            break
+                        rem -= len(chunk)
+                        yield chunk
+
+            resp = Response(gen(), 206, mimetype=mime, direct_passthrough=True)
+            resp.headers.update({
+                "Content-Range": f"bytes {b1}-{b2}/{fs}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(length),
+                "Cache-Control": "public, max-age=3600",
+            })
+            return resp
+        except Exception:
+            pass
+    resp = send_file(str(path), mimetype=mime)
+    resp.headers["Accept-Ranges"] = "bytes"
+    return resp
 
 # ─────────────────────────────────────────────────────────────────────────────
 # API — Транскрибация
